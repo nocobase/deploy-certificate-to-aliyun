@@ -49,14 +49,60 @@ In **Settings → Secrets and variables → Actions → Variables**:
 | `RENEW_BEFORE_DAYS` | No | Renew when fewer days than this remain. Default `30` |
 | `ALIYUN_CERT_REGION` | No | Region of the Certificate Management Service. Default `cn-hangzhou`; use `ap-southeast-1` for international accounts |
 
-`CDN_DOMAINS` has one certificate per line in the form `<certificate names>: <CDN domains>`. Names on both sides are separated by commas, semicolons or spaces, and lines starting with `#` are ignored:
+#### `CDN_DOMAINS` format
+
+Each line describes one certificate, split by a colon into two parts:
 
 ```
-*.example.com; a.docs.example.com; b.docs.example.com: cdn.example.com, docs.example.com, a.docs.example.com, b.docs.example.com
-example.org; *.example.org: example.org, img.example.org
+<certificate names>: <CDN domains>
 ```
 
-The left side lists every name on the certificate, wildcards included; the right side lists the CDN domains that use it. A wildcard only matches one label: `*.example.com` covers `docs.example.com` but neither `example.com` nor `a.docs.example.com`, so list those explicitly. The workflow rejects CDN domains that their certificate does not cover, and CDN domains listed on more than one line.
+- **Left side: the names on the certificate.** One certificate can contain many domain names; a browser accepts it when one of the names matches the domain it visits. This is what you would enter as the domains of a certificate request in tools like Certimate, so such a list can be pasted as is.
+- **Right side: the Aliyun CDN domains to deploy it to.** After issuing, the certificate is uploaded to each of these CDN accelerated domains. Every one of them must be covered by a name on the left.
+
+Names on both sides are separated by commas, semicolons or spaces. Lines starting with `#` are ignored.
+
+#### Example
+
+Suppose these domains are served by Aliyun CDN:
+
+- `www.example.com`
+- `docs.example.com`
+- `v1.docs.example.com`
+- `v2.docs.example.com`
+
+One certificate can cover all of them:
+
+```
+*.example.com;v1.docs.example.com;v2.docs.example.com: www.example.com, docs.example.com, v1.docs.example.com, v2.docs.example.com
+```
+
+The left side puts these names on the certificate:
+
+| Certificate name | Matches |
+| :-- | :-- |
+| `*.example.com` | Every one-level subdomain, such as `www.example.com` and `docs.example.com` |
+| `v1.docs.example.com` | Only itself |
+| `v2.docs.example.com` | Only itself |
+
+A wildcard only matches one label: `*.example.com` covers `docs.example.com`, but neither `example.com` nor `v1.docs.example.com`. That is why `v1.docs.example.com` and `v2.docs.example.com` are listed explicitly.
+
+The right side deploys the certificate to the four CDN domains: `www` and `docs` are covered by `*.example.com`, and `v1.docs` and `v2.docs` by their own names.
+
+To manage more certificates, add one line for each, for example another domain that also needs its apex:
+
+```
+*.example.com;v1.docs.example.com;v2.docs.example.com: www.example.com, docs.example.com, v1.docs.example.com, v2.docs.example.com
+example.org;*.example.org: example.org, img.example.org
+```
+
+#### What a run does with it
+
+1. Reads the certificate currently served by each CDN domain on the right and checks how many days it has left.
+2. If any of them has fewer than `RENEW_BEFORE_DAYS` left, issues a new certificate with the names on the left.
+3. Deploys the new certificate to the CDN domains that need it, then sends the Feishu notification.
+
+The workflow rejects a CDN domain that no name on its line covers, and a CDN domain listed on more than one line.
 
 ### 4. Enable and run the workflow
 
