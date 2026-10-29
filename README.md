@@ -8,7 +8,7 @@ Every Monday the workflow:
 
 1. Connects to each configured CDN domain over HTTPS and reads the certificate it currently serves.
 2. Marks a domain for renewal when its certificate expires within `RENEW_BEFORE_DAYS` (30 by default), does not match the domain, or cannot be read.
-3. For each certificate domain that has CDN domains to renew, issues one Let's Encrypt certificate covering `example.com` and `*.example.com` with [acme.sh](https://github.com/acmesh-official/acme.sh), using DNS-01 validation through Aliyun DNS.
+3. For each configured certificate that has CDN domains to renew, issues a Let's Encrypt certificate with the configured names (wildcards allowed) using [acme.sh](https://github.com/acmesh-official/acme.sh) and DNS-01 validation through Aliyun DNS.
 4. Uploads the certificate to every CDN domain that needs it.
 5. Sends a Feishu (Lark) card when certificates were renewed or something failed. Scheduled runs with nothing to renew stay silent; manual runs always report.
 
@@ -45,18 +45,18 @@ In **Settings → Secrets and variables → Actions → Variables**:
 
 | Variable | Required | Description |
 | :-- | :-- | :-- |
-| `CDN_DOMAINS` | Yes | Mapping from certificate domains to CDN domains, see below |
+| `CDN_DOMAINS` | Yes | Certificates to issue and the CDN domains to deploy them to, see below |
 | `RENEW_BEFORE_DAYS` | No | Renew when fewer days than this remain. Default `30` |
 | `ALIYUN_CERT_REGION` | No | Region of the Certificate Management Service. Default `cn-hangzhou`; use `ap-southeast-1` for international accounts |
 
-`CDN_DOMAINS` has one certificate domain per line, followed by a colon and the CDN domains it covers, separated by commas or spaces. Lines starting with `#` are ignored:
+`CDN_DOMAINS` has one certificate per line in the form `<certificate names>: <CDN domains>`. Names on both sides are separated by commas, semicolons or spaces, and lines starting with `#` are ignored:
 
 ```
-example.com: cdn.example.com, static.example.com
-example.org: example.org, img.example.org
+*.example.com; a.docs.example.com; b.docs.example.com: cdn.example.com, docs.example.com, a.docs.example.com, b.docs.example.com
+example.org; *.example.org: example.org, img.example.org
 ```
 
-A certificate for `example.com` covers `example.com` and its one-level subdomains such as `cdn.example.com`, but not `a.b.example.com`. The workflow rejects CDN domains that their certificate domain does not cover.
+The left side lists every name on the certificate, wildcards included; the right side lists the CDN domains that use it. A wildcard only matches one label: `*.example.com` covers `docs.example.com` but neither `example.com` nor `a.docs.example.com`, so list those explicitly. The workflow rejects CDN domains that their certificate does not cover, and CDN domains listed on more than one line.
 
 ### 4. Enable and run the workflow
 

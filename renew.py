@@ -1,6 +1,6 @@
 """Check the HTTPS certificates served by Aliyun CDN domains, and renew the ones close to expiry.
 
-For every certificate domain that has a CDN domain needing renewal, a single Let's Encrypt certificate covering `example.com` and `*.example.com` is issued with acme.sh (DNS-01 via Aliyun DNS), then uploaded to each of its CDN domains.
+For every configured certificate that has a CDN domain needing renewal, a Let's Encrypt certificate with the configured names (wildcards allowed) is issued with acme.sh (DNS-01 via Aliyun DNS), then uploaded to each of its CDN domains.
 
 Results are written to `GITHUB_OUTPUT` (`renewed`, `failed`, `rows`) for the notification steps, and to `GITHUB_STEP_SUMMARY`.
 """
@@ -25,38 +25,50 @@ def env_flag(name):
     return (os.getenv(name) or "").lower() == "true"
 
 
+def split_names(text):
+    return [d.lower() for d in re.split(r"[\s,;]+", text.strip()) if d]
+
+
 def parse_config(text):
-    """Parse `CDN_DOMAINS`, one certificate domain per line: `example.com: cdn.example.com, img.example.com`."""
-    config = {}
+    """Parse `CDN_DOMAINS`, one certificate per line: `<certificate names>: <CDN domains>`.
+
+    Names on both sides are separated by commas, semicolons or spaces, e.g. `*.example.com; a.docs.example.com: cdn.example.com, a.docs.example.com`.
+    Returns a list of (names, cdn_domains).
+    """
+    config = []
+    seen = set()
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
         if ":" not in line:
-            raise ValueError(f"CDN_DOMAINS line {lineno}: expected `example.com: cdn.example.com`, got {raw!r}")
-        base, cdns = line.split(":", 1)
-        base = base.strip().lower()
-        cdn_list = [d.lower() for d in re.split(r"[\s,]+", cdns.strip()) if d]
-        if not base or not cdn_list:
-            raise ValueError(f"CDN_DOMAINS line {lineno}: missing certificate domain or CDN domains")
-        for cdn in cdn_list:
-            # The certificate covers `example.com` and `*.example.com`, so only the apex and one-level subdomains work.
-            if not covers(base, cdn):
-                raise ValueError(f"CDN_DOMAINS line {lineno}: {cdn} is not covered by a certificate for {base} and *.{base}")
-        existing = config.setdefault(base, [])
-        for cdn in cdn_list:
-            if cdn not in existing:
-                existing.append(cdn)
+            raise ValueError(f"CDN_DOMAINS line {lineno}: expected `<certificate names>: <CDN domains>`, got {raw!r}")
+        left, right = line.split(":", 1)
+        names, cdns = list(dict.fromkeys(split_names(left))), list(dict.fromkeys(split_names(right)))
+        if not names or not cdns:
+            raise ValueError(f"CDN_DOMAINS line {lineno}: missing certificate names or CDN domains")
+        for name in names:
+            if not re.fullmatch(r"(\*\.)?([a-z0-9-]+\.)+[a-z0-9-]+", name):
+                raise ValueError(f"CDN_DOMAINS line {lineno}: invalid certificate name {name!r}")
+        for cdn in cdns:
+            # A wildcard only matches one label: `*.example.com` covers `docs.example.com` but not `a.docs.example.com`.
+            if not any(covers(name, cdn) for name in names):
+                raise ValueError(f"CDN_DOMAINS line {lineno}: {cdn} is not covered by any of {', '.join(names)}")
+            if cdn in seen:
+                raise ValueError(f"CDN_DOMAINS line {lineno}: {cdn} is listed more than once")
+            seen.add(cdn)
+        config.append((names, cdns))
     if not config:
         raise ValueError("CDN_DOMAINS is empty")
     return config
 
 
-def covers(pattern, host):
-    if pattern.startswith("*."):
-        suffix = pattern[1:]
+def covers(name, host):
+    """Whether a certificate name matches host, following TLS wildcard rules."""
+    if name.startswith("*."):
+        suffix = name[1:]
         return host.endswith(suffix) and "." not in host[: -len(suffix)]
-    return host == pattern or (host.endswith("." + pattern) and "." not in host[: -len(pattern) - 1])
+    return host == name
 
 
 def live_cert(host):
@@ -75,17 +87,17 @@ def live_cert(host):
     return cert.not_valid_after_utc, [n.lower() for n in names]
 
 
-def issue(base):
-    out = CERT_DIR / base
+def issue(names):
+    out = CERT_DIR / names[0].replace("*", "_")
     out.mkdir(parents=True, exist_ok=True)
     key_file, fullchain_file = out / "privkey.pem", out / "fullchain.pem"
     cmd = [
         ACME_SH, "--issue", "--server", "letsencrypt", "--dns", "dns_ali",
-        "-d", base, "-d", f"*.{base}", "--keylength", "2048",
+        *(arg for name in names for arg in ("-d", name)), "--keylength", "2048",
         "--key-file", str(key_file), "--fullchain-file", str(fullchain_file),
     ]
     env = dict(os.environ, Ali_Key=os.environ["ALIYUN_ACCESS_KEY_ID"], Ali_Secret=os.environ["ALIYUN_ACCESS_KEY_SECRET"])
-    print(f"::group::acme.sh issue {base}", flush=True)
+    print(f"::group::acme.sh issue {', '.join(names)}", flush=True)
     try:
         subprocess.run(cmd, check=True, env=env)
     finally:
@@ -136,7 +148,7 @@ def main():
 
     rows = {}
     pending = {}
-    for base, cdns in config.items():
+    for index, (names, cdns) in enumerate(config):
         for cdn in cdns:
             row = rows[cdn] = {"domain": cdn, "expires": "-", "status": "ok", "result": ""}
             try:
@@ -155,7 +167,7 @@ def main():
             left = f", {days} days left" if days is not None else ""
             print(f"{cdn}: expires {row['expires']}{left}" + (f", needs renewal ({reason})" if reason else ""))
             if reason or force:
-                pending.setdefault(base, []).append(cdn)
+                pending.setdefault(index, []).append(cdn)
                 row["result"] = reason or "强制续期"
             else:
                 row["result"] = f"无需续期（剩 {days} 天）"
@@ -170,15 +182,20 @@ def main():
     if pending:
         from aliyunsdkcore.client import AcsClient
 
+        for name in ("ALIYUN_ACCESS_KEY_ID", "ALIYUN_ACCESS_KEY_SECRET"):
+            if not os.getenv(name):
+                raise ValueError(f"{name} is not set")
+
         client = AcsClient(os.environ["ALIYUN_ACCESS_KEY_ID"], os.environ["ALIYUN_ACCESS_KEY_SECRET"], "cn-hangzhou")
 
-    for base, cdns in pending.items():
+    for index, cdns in pending.items():
+        names = config[index][0]
         try:
-            fullchain, key, expires = issue(base)
+            fullchain, key, expires = issue(names)
         except Exception as e:
-            print(f"::error::Failed to issue the certificate for {base}: {e}")
+            print(f"::error::Failed to issue the certificate for {', '.join(names)}: {e}")
             for cdn in cdns:
-                rows[cdn].update(status="failed", result=f"签发失败（{base}）")
+                rows[cdn].update(status="failed", result=f"签发失败（{names[0]}）")
             continue
         for cdn in cdns:
             try:
