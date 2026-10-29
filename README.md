@@ -1,85 +1,72 @@
 # Deploy Certificate to Aliyun
 
-每两个月自动部署泛解析证书到阿里云 CDN 上
+Automatically renew Let's Encrypt certificates for Aliyun (Alibaba Cloud) CDN domains with GitHub Actions.
 
-## ✨ 功能特点
+## How it works
 
-- 🔄 自动续期 Let's Encrypt 泛域名证书
-- ☁️ 自动部署到阿里云 CDN
-- ⏰ 每两个月自动运行一次
-- 📧 证书过期邮件提醒
-- 🔒 使用 GitHub Secrets 保护敏感信息
+Every Monday the workflow:
 
-## 🚀 如何使用
+1. Connects to each configured CDN domain over HTTPS and reads the certificate it currently serves.
+2. Marks a domain for renewal when its certificate expires within `RENEW_BEFORE_DAYS` (30 by default), does not match the domain, or cannot be read.
+3. For each certificate domain that has CDN domains to renew, issues one Let's Encrypt certificate covering `example.com` and `*.example.com` with [acme.sh](https://github.com/acmesh-official/acme.sh), using DNS-01 validation through Aliyun DNS.
+4. Uploads the certificate to every CDN domain that needs it.
+5. Sends a Feishu (Lark) card when certificates were renewed or something failed. Scheduled runs with nothing to renew stay silent; manual runs always report.
 
-### 第一步：Fork 项目仓库
+Domains that fail are retried on the next weekly run. Each run also re-enables the workflow, so GitHub does not disable the schedule after 60 days without repository activity.
 
-1. 打开本项目的 GitHub 仓库页面
-2. 点击页面右上角的 **"Fork"** 按钮
-3. 这会在您的 GitHub 账户下创建一个完整的副本
+## Setup
 
-### 第二步：配置阿里云访问密钥（AK/SK）
+### 1. Create an Aliyun RAM user
 
-为了能让 GitHub 的脚本有权限操作您的阿里云账户，您需要提供一个具有相应权限的 AccessKey。
+In the [RAM console](https://ram.console.aliyun.com/), create a user dedicated to this workflow with OpenAPI access only, then create an AccessKey for it. Grant these policies:
 
-1. 登录[阿里云控制台](https://homenew.console.aliyun.com/)，进入 **访问控制 (RAM)** 页面
-2. 创建一个专用于此项目的用户（推荐，出于安全最佳实践）
-3. 为该用户授权以下策略权限：
-   - `AliyunDNSFullAccess`（管理 DNS 解析，用于自动验证域名所有权）
-   - `AliyunCDNFullAccess`（管理 CDN，用于上传和部署证书）
-   - `AliyunYundunCertFullAccess`（管理 SSL 证书服务）
-4. 为这个用户创建一个 **AccessKey (AK/SK)**，并妥善保存
+- `AliyunDNSFullAccess`: add and remove the TXT records used for DNS validation
+- `AliyunCDNFullAccess`: set the HTTPS certificate of CDN domains
+- `AliyunYundunCertFullAccess`: store uploaded certificates in the Certificate Management Service
 
-### 第三步：在 GitHub 仓库中设置秘密变量
+The certificate domains must be hosted on Aliyun DNS under the same Aliyun account.
 
-1. 进入您 **Fork 出来的仓库** 的页面
-2. 点击顶部的 **"Settings"** 选项卡
-3. 在左侧边栏中找到 **"Secrets and variables" → "Actions"**
-4. 点击 **"New repository secret"** 按钮，逐个添加以下秘密变量：
+### 2. Configure secrets
 
-| 变量名                     | 说明                                                  | 示例值                         |
-| :------------------------- | :---------------------------------------------------- | :----------------------------- |
-| `ALIYUN_ACCESS_KEY_ID`     | 阿里云 AccessKey ID                                   | `LTAI5txxxxxxxxxxxxx`          |
-| `ALIYUN_ACCESS_KEY_SECRET` | 阿里云 AccessKey Secret                               | `h6J9Zxxxxxxxxxxxxxxxxxxxx`    |
-| `DOMAINS`                  | 主域名，多个用**英文逗号**隔开                        | `example.com,test.org`         |
-| `ALIYUN_CDN_DOMAINS`       | CDN 域名，与 DOMAINS 顺序对应，多个用**英文逗号**隔开 | `cdn.example.com,img.test.org` |
-| `EMAIL`                    | 接收通知的邮箱地址                                    | `your-email@example.com`       |
+In **Settings → Secrets and variables → Actions → Secrets**:
 
-### 第四步：触发工作流运行
+| Secret | Required | Description |
+| :-- | :-- | :-- |
+| `ALIYUN_ACCESS_KEY_ID` | Yes | AccessKey ID of the RAM user |
+| `ALIYUN_ACCESS_KEY_SECRET` | Yes | AccessKey Secret of the RAM user |
+| `FEISHU_WEBHOOK_URL` | No | Feishu custom bot webhook URL. Notifications are skipped when unset |
+| `EMAIL` | No | Email for the Let's Encrypt ACME account |
 
-1. 在您 Fork 的仓库页面，点击 **"Code"** 选项卡
-2. 找到任何一个文件（比如 `README.md`）并点击编辑按钮（铅笔图标）
-3. 随意做一些无意义的修改，比如在末尾加个空格或换行
-4. 填写提交信息（如 `Trigger first run`），然后点击 **"Commit changes"**
+If the Feishu bot has a security setting, use a keyword (e.g. `证书`, which every card title contains) or an IP allowlist; signature verification is not supported.
 
-### 第五步：查看执行结果
+### 3. Configure variables
 
-1. 提交完成后，点击仓库顶部的 **"Actions"** 选项卡
-2. 查看工作流运行状态和详细日志
-3. 如果所有配置正确，工作流会显示绿色的对勾（✅），表示执行成功
-4. 登录 [阿里云 CDN 控制台](https://cdn.console.aliyun.com/)，检查证书是否已更新
+In **Settings → Secrets and variables → Actions → Variables**:
 
-## ⚠️ 重要注意事项
+| Variable | Required | Description |
+| :-- | :-- | :-- |
+| `CDN_DOMAINS` | Yes | Mapping from certificate domains to CDN domains, see below |
+| `RENEW_BEFORE_DAYS` | No | Renew when fewer days than this remain. Default `30` |
+| `ALIYUN_CERT_REGION` | No | Region of the Certificate Management Service. Default `cn-hangzhou`; use `ap-southeast-1` for international accounts |
 
-- **安全性**：阿里云 AK/SK 是非常敏感的凭证，务必通过 **Secrets** 的方式配置，绝不要直接写在代码文件里
-- **域名对应关系**：`DOMAINS` 和 `ALIYUN_CDN_DOMAINS` 的顺序必须严格对应，否则会导致证书部署到错误的 CDN 域名上
-- **分隔符**：多个域名之间使用**英文逗号**分隔，不要使用空格或其他符号
-- **首次运行**：建议手动触发一次以确保配置无误
-- **费用**：Let's Encrypt 证书本身是免费的，但关联的阿里云 CDN、DNS 等服务可能会产生正常费用
+`CDN_DOMAINS` has one certificate domain per line, followed by a colon and the CDN domains it covers, separated by commas or spaces. Lines starting with `#` are ignored:
 
-## 在 Actions 里查看状态
+```
+example.com: cdn.example.com, static.example.com
+example.org: example.org, img.example.org
+```
 
-github 修改了 action 的安全措施，fork 后需要去手动启用才能开始自动任务。需要在 Actions 里查看定时任务执行情况
-![Image](https://cdn.fengxianhub.top/resources-master/638562892-f3255983-7032-4b18-b3f7-113b1346cdd3.png)
+A certificate for `example.com` covers `example.com` and its one-level subdomains such as `cdn.example.com`, but not `a.b.example.com`. The workflow rejects CDN domains that their certificate domain does not cover.
 
-## 🔧 技术支持
+### 4. Enable and run the workflow
 
-如果您遇到问题，请：
+1. Open the **Actions** tab. Forked repositories have workflows disabled by default; click the button to enable them.
+2. Select **Renew Aliyun CDN certificates → Run workflow**. Check **dry_run** first to verify the configuration without issuing anything; the run summary and the Feishu card list each domain with its expiry date.
+3. Run it again without **dry_run**. Check **force** to renew every domain regardless of expiry.
+4. Check the certificates in the [Aliyun CDN console](https://cdn.console.aliyun.com/). It usually takes a few minutes to take effect across the CDN.
 
-1. 检查 GitHub Actions 日志中的错误信息
-2. 确保所有秘密变量已正确设置
-3. 确认阿里云 RAM 用户具有所需权限
+## Notes
 
----
-
-至此，您就完成了所有设置，之后每隔约 60 天，GitHub 就会自动帮你免费续期并部署证书，一劳永逸。
+- Domain names are configured as variables rather than secrets so they stay readable in logs. Never commit AccessKeys to the repository.
+- Each renewal uploads a new certificate named `<cdn-domain>-<UTC timestamp>` to the Certificate Management Service. Old certificates are not deleted automatically.
+- Let's Encrypt allows 5 duplicate certificates per week for the same set of domain names. Avoid repeatedly running with **force**.
